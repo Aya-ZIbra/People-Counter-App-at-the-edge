@@ -1,59 +1,198 @@
-# Project Write-Up
+# Project Write\-Up
+## How to run?
+```
+python main.py -i resources/Pedestrian_Detect_2_1_1.mp4 -m public/mobilenet-ssd/mobilenet-ssd.xml -l /opt/intel/openvino/deployment_tools/inference_engine/lib/intel64/libcpu_extension_sse4.so -d CPU -pt 0.2 -ft 10 | ffmpeg -v warning -f rawvideo -pixel_format bgr24 -video_size 768x432 -framerate 24 -i - http://0.0.0.0:3004/fac.ffm
+```
+## [](#explaining-custom-layers)Explaining Custom Layers
+- Some of the potential reasons for handling custom layers in a trained model are...
 
-You can use this document as a template for providing your project write-up. However, if you
-have a different format you prefer, feel free to use it as long as you answer all required
-questions. 
+Model Optimizer searches for each layer of the input model in the list of known layers before building the model's internal representation, optimizing the model, and producing the Intermediate Representation.
 
-## Explaining Custom Layers
+The list of known layers is different for each of supported frameworks. Custom layers are layers that are not included into a list of known layers. If your topology contains any layers that are not in the list of known layers, the Model Optimizer classifies them as custom.
 
-The process behind converting custom layers involves...
+- The process behind converting custom layers involves ...
 
-Some of the potential reasons for handling custom layers are...
+The general process is as shown:
 
-## Comparing Model Performance
+![mo_caffe_priorities.png](https://docs.openvinotoolkit.org/latest/mo_caffe_priorities.png)
 
-My method(s) to compare models before and after conversion to Intermediate Representations
-were...
+Example custom layer network
 
-The difference between model accuracy pre- and post-conversion was...
+1.  The example model is fed to the Model Optimizer that **loads the model** with the special parser, built on top of `caffe.proto` file. In case of failure, Model Optimizer asks you to prepare the parser that can read the model. For more information, refer to Model Optimizer, [FAQ #1](https://docs.openvinotoolkit.org/latest/MO_FAQ.html#FAQ1).
+2.  Model Optimizer **extracts the attributes of all layers**. In particular, it goes through the list of layers and attempts to find the appropriate extractor. In order of priority, Model Optimizer checks if the layer is:
 
-The size of the model pre- and post-conversion was...
+    *   Registered in `CustomLayersMapping.xml`
+    *   Registered as a Model Optimizer extension
+    *   Registered as a standard Model Optimizer layer
 
-The inference time of the model pre- and post-conversion was...
+    When the Model Optimizer finds a satisfying condition from the list above, it extracts the attributes according to the following rules:
 
-## Assess Model Use Cases
+    *   For bullet #1 \- either takes all parameters or no parameters, according to the content of `CustomLayersMapping.xml`
+    *   For bullet #2 \- takes only the parameters specified in the extension
+    *   For bullet #3 \- takes only the parameters specified in the standard extractor
+3.  Model Optimizer **calculates the output shape of all layers**. The logic is the same as it is for the priorities. **Important:** the Model Optimizer always takes the first available option.
+4.  Model Optimizer **optimizes the original model and produces the Intermediate Representation**.
 
-Some of the potential use cases of the people counter app are...
+## [](#comparing-model-performance)Comparing Model Performance
+
+**My method(s) to compare models before and after conversion to Intermediate Representations were**
+`compare_app.py` script is writen for performance comparison and the performance figures are dumped into stats_\*.txt files.
+You can run this script as:
+```
+rm stats*
+rm duration*
+python compare_app.py -m <model.xml>
+```
+### Running the pre\-trained model without the use of the OpenVINO™ Toolkit
+The pre-conversion original models were run using OpenCV DNN module. We could have also run these using Caffe platform but the inference time would have been even slower as Caffe is an old platform. For more info, check: [CPU Performance Comparison of OpenCV and other Deep Learning frameworks | Learn OpenCV](https://www.learnopencv.com/cpu-performance-comparison-of-opencv-and-other-deep-learning-frameworks/)
+
+```
+python main_unopt.py -i resources/Pedestrian_Detect_2_1_1.mp4 -m public/mobilenet-ssd/mobilenet-ssd.caffemodel -l /opt/intel/openvino/deployment_tools/inference_engine/lib/intel64/libcpu_extension_sse4.so -d CPU -pt 0.2
+```
+
+**Notes**
+If OpenCV is compiled with Intel's Inference Engine library, DNN_BACKEND_DEFAULT means DNN_BACKEND_INFERENCE_ENGINE. Otherwise it equals to DNN_BACKEND_OPENCV.
+```
+net = cv2.dnn.readNetFromCaffe(args["prototxt"], args["model"])
+net.setPreferableBackend(cv2.dnn.DNN_BACKEND_INFERENCE_ENGINE)
+net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
+
+# convert the frame to a blob and pass the blob through the
+# network and obtain the detections W=H= 300
+blob = cv2.dnn.blobFromImage(frame, 0.007843, (W, H), 127.5)
+net.setInput(blob)
+detections = net.forward()
+```
+
+### The difference between model accuracy pre- and post-conversion was...
+Accuracy = (TN+ TP)/ total = Number of true frames/ total number of frames
+
+The detection confidence threshold was set to ZERO for the sake of comparison.
+To determine the true frames, ground truth was needed. This was generated by regularization of the pre-converted model results. 
+Regularization here means compensating model errors by decreasing the people count in the frame only if the detected count dropped in muliple N successive frames determined by the *frame_thres* variable. 
+
+```
+Pre-conversion model: 
+Matching 1379 out of 1394 frames
+Accuracy = 98 %
+Optimized IR model: 
+Matching 1339 out of 1394 frames
+Accuracy = 96 %
+```
+
+![](https://github.com/Aya-ZIbra/People-Counter-App-at-the-edge/blob/master/people_counter_accuracy.JPG?raw=true)
+
+The analysis also shows that the minimum confidence of any detected person wasn't affected by the conversion and is around 0.25.
+
+### The size of the model pre- and post-conversion was...
+
+|size | file |
+|---------|--------------------|
+|23133704 | mobilenet-ssd.bin |
+|23147564 | mobilenet-ssd.caffemodel|
+|29353 | mobilenet-ssd.prototxt|
+|66589 |  mobilenet-ssd.xml |
+
+No size reduction observed!!
+
+### The inference time of the model pre- and post-conversion was...
+Using the following method:
+```
+import time
+start_time = time.time()
+<< code for inference >>
+inference_time = time.time() - start_time
+```
+* Frame_count 	1395
+* Input video fps 10
+
+| | Pre-conversion | Post-conversion |
+|----|----|---|
+|Average detection time(ms) |	146 | 40|
+|Total_time(s) |	293| 144 |
+| Inference througput (fps)| 4.8 | 9.7|
+
+Inference throwput is much improved after conversion. Yet, it is lower than the input stream fps. 
+In non-real time system i.e. recorded video like in this project, you can have all the time you need to do the inference and you can use frame count and frame rate to work out the video time.
+
+For real time system, the camera system will keep streaming the video frame, you will get the latest frame, process it, then get the next latest frame. If your inference is not fast enough, then frames will be lost. You will need to use the system time but long inference time results in inaccuracies in the duration calculations. 
+
+* *Further improvement:*
+
+The detection time itself is small so there is room for improving the throwput. Handling inference requests async to hide the latency due input capturing. The overall frame latency should decrease from around 100 ms to roughly the max(63 , 40) = 60 ms. 
+
+```
+|**input capture time**| avg 63.26950212120155 ms| min 62.07847595214844 |max 80.7943344116211 |
+
+|**detection time**| avg 39.31442240902478 ms | min 37.95981407165527 | max 57.42788314819336 | 
+```
+
+### What about differences in network needs and costs of using cloud services as opposed to at the edge?
+The network requirments would be higher BW to send the whole video to the cloud server. This is definitely higher cost than sending the the doing the inference at the edge and sending the stats only to the cloud. 
+
+## [](#assess-model-use-cases)Assess Model Use Cases
+
+Some of the potential use cases of the people counter app are retail applications, corporate security, ATM security. 
 
 Each of these use cases would be useful because...
+### Retail floorplanning for COVID 19
+To track the number of people in a specific aisle for.If some aisle is reported busier than other aisles, there should be a new arrangement of goods.
+### Corporate Security
+To check at people entry that the number of people swapping their IDs is the same as the number of detected people. No strangers are passing in with employees.
+### ATM security
+No more than one person is allowed to spend long duration in front of the machine. If two people detected standing for more than a specific duration threshold, an alert should be sent to server.
 
-## Assess Effects on End User Needs
+## [](#assess-effects-on-end-user-needs)Assess Effects on End User Needs
 
-Lighting, model accuracy, and camera focal length/image size have different effects on a
-deployed edge model. The potential effects of each of these are as follows...
+Lighting, model accuracy, and camera focal length/image size have different effects on a deployed edge model. The potential effects of each of these are as follows...
 
-## Model Research
+**Lighting**
+As we saw the model prone to false negative predictions for some frames when the person is in shadows or dressed in dark clothes. These effect are similar to poor lighting effects. If the error is maintained for N frames in a row, where N is larger than the frame threshold, this would be interpreted as one person exiting and another entering the place. Thus, leading to mis-calculated current_count and total_count. 
 
-[This heading is only required if a suitable model was not found after trying out at least three
-different models. However, you may also use this heading to detail how you converted 
-a successful model.]
+**Model accuracy**
+The limits of the model accuracy affects the way we deployed the model, for example, by introducing frame confidence threshold. Some side effects of this on the end user are:
 
-In investigating potential people counter models, I tried each of the following three models:
+- The confidence threshold, in our case, is set to 1 sec (10 frames). If this is long enough for one person to leave and another to enter, then our system would not be able to capture this event and wouldn't see any change in the total_count. 
+- Whenever a change in the number of people is detected by the model, the application holds this change for 10 frames before deciding if that is a real change or just a model output glitch. In real-time applications, this means we have a delay of 1 sec in people detection.
 
-- Model 1: [Name]
-  - [Model Source]
-  - I converted the model to an Intermediate Representation with the following arguments...
-  - The model was insufficient for the app because...
-  - I tried to improve the model for the app by...
-  
-- Model 2: [Name]
-  - [Model Source]
-  - I converted the model to an Intermediate Representation with the following arguments...
-  - The model was insufficient for the app because...
-  - I tried to improve the model for the app by...
+**Camera focal length (image size)**
+If we are to zoom out, for example, the people size would be smaller. This may result in detection accuracy deterioration. But on the other side, makes it less likely for the system to miss changes during the 10-frame hold time. That's because we can see a larger area that takes people longer times to enter and leave. 
 
-- Model 3: [Name]
-  - [Model Source]
-  - I converted the model to an Intermediate Representation with the following arguments...
-  - The model was insufficient for the app because...
-  - I tried to improve the model for the app by...
+
+## [](#model-research)Model Research
+```
+Note: The model cannot be one of the existing Intermediate Representations provided by Intel®.
+The intel model "" was deployed in a first experiment in the application.
+```
+### Convert a Model into an Intermediate Representation with the Model Optimizer
+#### Link to the original model
+https://github.com/chuanqi305/MobileNet-SSD
+
+Command used in the terminal to download the model:
+```
+/opt/intel/openvino/deployment_tools/tools/model_downloader/downloader.py --name mobilenet-ssd
+```
+open_model_zoo link: https://github.com/opencv/open_model_zoo/blob/master/models/public/mobilenet-ssd/mobilenet-ssd.md
+
+**Model Output information**
+The array of detection summary info, name \- `detection_out`, shape \- `1, 1, N, 7`, where N is the number of detected bounding boxes. For each detection, the description has the format: \[ `image_id`, `label`, `conf`, `x_min`, `y_min`, `x_max`, `y_max`\], where:
+
+*   `image_id` \- ID of the image in the batch
+*   `label` \- predicted class ID
+*   `conf` \- confidence for the predicted class
+*   (`x_min`, `y_min`) \- coordinates of the top left bounding box corner (coordinates are in normalized format, in range \[0, 1\])
+*   (`x_max`, `y_max`) \- coordinates of the bottom right bounding box corner (coordinates are in normalized format, in range \[0, 1\])
+
+#### Command used in the terminal to convert it to an Intermediate Representation with the Model Optimizer.
+```
+/opt/intel/openvino/deployment_tools/model_optimizer/mo_caffe.py --input_model public/mobilenet-ssd/mobilenet-ssd.caffemodel  -o public/mobilenet-ssd --data_type FP32 --scale 256 --mean_values [127,127,127]
+```
+[Converting a Model Using General Conversion Parameters - OpenVINO™ Toolkit](https://docs.openvinotoolkit.org/latest/_docs_MO_DG_prepare_model_convert_model_Converting_Model_General.html#when_to_specify_mean_and_scale_values)
+#### Attempts to get the model to work
+* Probablity Threshold adjustment
+Was kept at 0.2 based on earlier analysis of min_conf.
+* Frame Threshold introduction and adjustment
+Adjusting confidence threshold or accounting for 10 frames where the model fails to see a person already counted and would otherwise double count.
+```
+parser.add_argument("-ft", "--frame_threshold", type=float, default=5, help="Frame threshold for detections filtering "(5 by default)")
+```
